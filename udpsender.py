@@ -6,10 +6,6 @@ import os
 import time
 import socket
 import threading
-import select
-
-
-TIME_SLICE = 0.1  # seconds
 
 
 class Sender(threading.Thread):
@@ -18,65 +14,79 @@ class Sender(threading.Thread):
                  fname,
                  addr,
                  loop=False,
-                 psize=1316,
+                 psize=1472,
                  bitrate=4 * 1024 * 1024):
         super(Sender, self).__init__()
+        self.time_slice = 0.1  # seconds
+
         self.fname = fname
         self.addr = addr
         self.loop = loop
         self.psize = psize
         self.bitrate = bitrate
 
-        print 'File name: ', self.fname
+        print 'File name:', self.fname
         ip, port = self.addr
-        print 'IP: ', ip
-        print 'Port: ', port
-        print 'Loop: ', self.loop
-        print 'Packet size: ', self.psize
-        print 'Bit rate: ', self.bitrate
+        print 'IP:', ip
+        print 'Port:', port
+        print 'Loop:', self.loop
+        print 'Packet size:', self.psize
+        print 'Bit rate:', self.bitrate
         print ''
         self.skip_send = False
         self.exit = False
+        self.f = None
 
-    def run(self):
-        global TIME_SLICE
+    def open(self):
         try:
             if self.fname is None:
-                f = sys.stdin
+                self.f = sys.stdin
             else:
-                f = open(self.fname, 'r')
+                self.f = open(self.fname, 'rb')
         except IOError as err:
             print 'Exception: ', err
             return
+
+    def close(self):
+        if self.f is not None:
+            self.f.close()
+            self.f = None
+
+    def run(self):
+        self.open()
 
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         byterate = self.bitrate / 8
-        bps = byterate * TIME_SLICE  # bps = bytes_per_slice
-        pps = int(round(bps / self.psize))  # pps = packets_per_slice
+        bytes_per_slice = byterate * self.time_slice
+        packets_per_slice = int(round(bytes_per_slice / self.psize))
 
-        if pps <= 1:
+        if packets_per_slice <= 1:
             pack_rate = float(byterate) / self.psize
-            TIME_SLICE = 1 / pack_rate
-            pps = 1
+            self.time_slice = 1 / pack_rate
+            packets_per_slice = 1
 
         count = 0
+        start_time = time.time()
         while not self.exit:
-            if not count:
-                start_time = time.clock()
+            if count == packets_per_slice:
+                cur_time = time.time()
+                past_time = cur_time - start_time
+                if past_time < self.time_slice:
+                    time.sleep(self.time_slice - past_time)
+
+                count = 0
+                start_time = time.time()
 
             if self.fname is None:
-                if select.select([f], [], [], TIME_SLICE)[0]:
-                    data = f.read(self.psize)
-                else:
-                    continue
+                data = self.f.readline(self.psize).rstrip()
             else:
-                data = f.read(self.psize)
+                data = self.f.read(self.psize)
 
             if not len(data):
                 if self.loop:
-                    f.seek(0)
+                    self.f.seek(0)
                     continue
                 else:
                     break
@@ -88,20 +98,9 @@ class Sender(threading.Thread):
                     print str(e)
 
             count += 1
-            if count == pps:
-                count = 0
-
-                cur_time = time.clock()
-                send_time = cur_time - start_time
-                wait_time = TIME_SLICE - send_time
-                if wait_time > 0:
-                    time.sleep(wait_time)
-
-                # print 's', send_time
-                # print 'w', wait_time
 
         s.close()
-        f.close()
+        self.close()
 
     def stop(self):
         self.exit = True
@@ -121,12 +120,11 @@ def usage():
 
         -i file, --input=file:          Reads data to be transmitted from file.
                                         If this parameter is not supplied,
-                                        data to be transmitted is read from stdin
-                                        instead.
+                                        data is read from stdin instead.
 
         -l, --loop:                     Send file in loop mode.
 
-        -p packSize, --pack=packSize:   Choose the packet size. Default is 1316.
+        -p packSize, --pack=packSize:   Choose the packet size. Default is 1472.
 
         -b bitrate, --bitrate=bitrate:  Limits bandwidth used by udpsender.
                                         Bitrate may be expressed in bits per 
@@ -149,7 +147,7 @@ def main():
     ip = '224.222.222.222'
     port = 36300
     loop = False
-    pack = 1316
+    pack = 1472
     bitrate = 4 * 1024 * 1024
 
     try:
@@ -196,16 +194,19 @@ def main():
             ip = args[0]
 
     s = Sender(fname, (ip, port), loop, pack, bitrate)
+    print 'Sending...'
     s.start()
 
     try:
         while True:
-            s.join(float(TIME_SLICE) / 1000)
+            s.join(0.1)
             time.sleep(0.1)
             if not s.is_alive():
                 break
     except KeyboardInterrupt:
         s.stop()
+
+    print 'Exited.'
 
 if __name__ == '__main__':
     main()
